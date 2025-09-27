@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import NullPool
-import traceback
 import plotly.express as px
 import requests
 
@@ -10,29 +9,17 @@ import requests
 st.set_page_config(layout="wide")
 
 # --- ==================================================================== ---
-# ---    PART 1: FUNCTIONS (Logo, Database, Data Loading)
+# ---    PART 1: FUNCTIONS (Logo, Database, Data Loading)
 # --- ==================================================================== ---
 
 @st.cache_data
 def load_logo_from_repo():
-    """Fetches the logo from a private GitHub repo, failing silently on any error."""
-    OWNER_REPO = "COMOFPM/technical_condition_monitoring" 
-    LOGO_PATH = "images/alamtri_logo.jpeg"
+    """Fetches the logo from a public GitHub repo, failing silently on any error."""
+    LOGO_URL = "https://raw.githubusercontent.com/COMOFPM/technical_condition_monitoring/main/images/alamtri_logo.jpeg"
     
     try:
-        GITHUB_TOKEN = st.secrets["GITHUB_PRIVATE_TOKEN"]
-    except KeyError:
-        return None
-
-    API_URL = f"https://api.github.com/repos/{OWNER_REPO}/contents/{LOGO_PATH}"
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3.raw"
-    }
-    
-    try:
-        response = requests.get(API_URL, headers=headers)
-        response.raise_for_status()
+        response = requests.get(LOGO_URL)
+        response.raise_for_status() # Raise an exception for bad status codes
         return response.content
     except requests.exceptions.RequestException:
         return None
@@ -74,9 +61,9 @@ def load_filtered_data(component, points, equipments):
                 FROM data d
                 LEFT JOIN alarm_standards stds ON d.alarm_standard = stds.standard
                 WHERE d.component = :component
-                  AND d.point_measurement IN :points
-                  AND d.equipment_name IN :equipments
-                  AND d.value IS NOT NULL
+                    AND d.point_measurement IN :points
+                    AND d.equipment_name IN :equipments
+                    AND d.value IS NOT NULL
                 ORDER BY d.date DESC
             """)
             
@@ -97,33 +84,6 @@ def load_filtered_data(component, points, equipments):
         st.error("Error: Failed to Load Filtered Monitoring Data", icon="📊")
         return pd.DataFrame()
 
-# --- HELPER FUNCTION FOR COLUMN MAPPING ---
-def map_and_clean_columns(df):
-    COLUMN_MAPPING = {
-        'identifier': 'identifier', 'equipment_tag_id': 'equipment_tag_id',
-        'equipment_name': 'equipment_name', 'technology': 'technology',
-        'component': 'component', 'key': 'key', 'alarm_standard': 'alarm_standard',
-        'date': 'date', 'point_measurement': 'point_measurement', 'value': 'value',
-        'unit': 'unit', 'status': 'status', 'excellent': 'excellent',
-        'acceptable': 'acceptable', 'alarm_yellow_warning': 'requires_evaluation',
-        'unacceptable_alarm': 'unacceptable', 'note': 'note',
-    }
-    rename_dict = {}
-    ignored_columns = []
-    for col in df.columns:
-        normalized_col = str(col).lower().strip().replace(' ', '_').replace('(', '').replace(')', '')
-        if normalized_col in COLUMN_MAPPING:
-            rename_dict[col] = COLUMN_MAPPING[normalized_col]
-        else:
-            ignored_columns.append(col)
-    if 'identifier' not in rename_dict.values():
-        df['identifier'] = [f"generated_{pd.Timestamp.now().strftime('%Y%m%d%H%M%S')}_{i}" for i in range(len(df))]
-        st.info("Note: 'identifier' column was not found and has been auto-generated.", icon="🤖")
-    df.rename(columns=rename_dict, inplace=True)
-    if ignored_columns:
-        st.warning(f"The following columns were found in the file but will be ignored: {', '.join(ignored_columns)}", icon="⚠️")
-    return df
-
 # --- ==================================================================== ---
 # ---   PART 2: APP INITIALIZATION & MAIN LOGIC
 # --- ==================================================================== ---
@@ -135,7 +95,8 @@ if engine is None:
     st.stop()
 
 st.sidebar.title("Navigation")
-page = st.sidebar.radio("Choose a page", ["Monitoring Dashboard", "Upload New Data", "Database Viewer"])
+# Removed "Upload New Data" page from the options
+page = st.sidebar.radio("Choose a page", ["Monitoring Dashboard", "Database Viewer"])
 
 # --- ==================================================================== ---
 # ---   PAGE 1: MONITORING DASHBOARD (FINAL VERSION)
@@ -285,65 +246,7 @@ if page == "Monitoring Dashboard":
         st.info("ℹ️ Please select a component, at least one point, and at least one equipment to see the data.")
 
 # --- ==================================================================== ---
-# ---   PAGE 2: UPLOAD NEW DATA
-# --- ==================================================================== ---
-elif page == "Upload New Data":
-    logo_col, title_col = st.columns([1, 8])
-    with logo_col:
-        if logo_bytes:
-            st.image(logo_bytes, width=150)
-    with title_col:
-        st.title("Upload New Data")
-    st.write("This uploader automatically detects column names and formats.")
-    table_options = ["data", "alarm_standards", "equipment", "alarm", "component"]
-    target_table = st.selectbox("1. Select table to add data to", options=table_options)
-    uploaded_file = st.file_uploader("2. Choose a file", type=["csv", "xlsx"])
-    if st.button("3. Upload and Add Data"):
-        if uploaded_file is not None and target_table is not None:
-            try:
-                if uploaded_file.name.endswith('.csv'):
-                    uploaded_file.seek(0)
-                    first_line = uploaded_file.readline().decode('utf-8')
-                    uploaded_file.seek(0)
-                    delimiter = ';' if ';' in first_line else ','
-                    st.info(f"Detected '{delimiter}' as the delimiter.")
-                    upload_df = pd.read_csv(uploaded_file, sep=delimiter, encoding='utf-8-sig')
-                elif uploaded_file.name.endswith('.xlsx'):
-                    upload_df = pd.read_excel(uploaded_file, engine='openpyxl')
-                else:
-                    st.error("Unsupported file type.", icon="📄")
-                    st.stop()
-                st.info("Attempting to map file columns to database format...")
-                upload_df = map_and_clean_columns(upload_df)
-                st.write("Preview of data after column mapping:", upload_df.head())
-                if 'identifier' in upload_df.columns:
-                    upload_df.dropna(subset=['identifier'], inplace=True)
-                else:
-                    st.error("Upload Failed: Critical 'identifier' column is missing after mapping.", icon="❌")
-                    st.stop()
-                if upload_df.empty:
-                    st.error("Upload Failed: No valid data found after initial cleaning.", icon="❌")
-                    st.stop()
-                st.info(f"Verifying columns for the '{target_table}' table...")
-                with engine.connect() as connection:
-                    db_cols = pd.read_sql(text(f"SELECT * FROM {target_table} LIMIT 0"), connection).columns.tolist()
-                final_upload_df = upload_df[[col for col in db_cols if col in upload_df.columns]]
-                st.info(f"All checks passed. Appending {len(final_upload_df)} valid rows to '{target_table}'...")
-                with engine.connect() as connection:
-                    final_upload_df.to_sql(target_table, con=connection, if_exists='append', index=False)
-                st.success(f"Successfully added {len(final_upload_df)} rows to the '{target_table}' table!", icon="🎉")
-                st.info("Clearing data cache... The dashboard will show the new data on its next load.")
-                st.cache_data.clear()
-            except Exception as upload_error:
-                st.error("An Unexpected Error Occurred During Upload", icon="🔥")
-                st.warning("This could be due to issues like incorrect data types or other formatting problems.")
-                with st.expander("Show Error Details for Administrator"):
-                    st.code(traceback.format_exc())
-        else:
-            st.warning("⚠️ Please select a table and upload a file first.")
-
-# --- ==================================================================== ---
-# ---   PAGE 3: DATABASE VIEWER
+# ---   PAGE 2: DATABASE VIEWER (Previously Page 3)
 # --- ==================================================================== ---
 elif page == "Database Viewer":
     logo_col, title_col = st.columns([1, 8])
@@ -382,4 +285,3 @@ elif page == "Database Viewer":
             st.dataframe(table_df, use_container_width=True, hide_index=False)
         else:
             st.warning(f"The table '{table_to_view}' is empty or could not be loaded.")
-
